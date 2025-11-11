@@ -40,10 +40,37 @@ export default function SuneungTimeCapsule() {
   const CAPSULE_WIDTH = 80; // 모바일용 크기
   const CAPSULE_HEIGHT = 100;
 
-  // 스토리지에서 캡슐 불러오기
-  useEffect(() => {
-    loadCapsules();
-  }, []);
+  // localStorage에서 캡슐 불러오기 (폴백) - 먼저 정의
+  const loadCapsulesFromLocalStorage = () => {
+    try {
+      const storedCapsules = localStorage.getItem('timeCapsules');
+      if (storedCapsules) {
+        const loadedCapsules = JSON.parse(storedCapsules);
+        if (Array.isArray(loadedCapsules) && loadedCapsules.length > 0) {
+          const capsulesWithPosition = loadedCapsules.map(capsule => {
+            if (!capsule.position) {
+              capsule.position = {
+                x: Math.random() * 60 + 20,
+                y: 10 + Math.random() * 20
+              };
+            }
+            capsule.velocity = capsule.velocity || { x: 0, y: 0 };
+            return capsule;
+          });
+          setCapsules(capsulesWithPosition);
+        } else {
+          setCapsules([]);
+        }
+      } else {
+        setCapsules([]);
+      }
+    } catch (error) {
+      console.error('localStorage 로드 실패:', error);
+      setCapsules([]);
+    }
+    // 항상 로딩 상태 해제 (finally 블록 대신 직접 호출)
+    setLoading(false);
+  };
 
   // 모달이 열릴 때 body 스크롤 방지
   useEffect(() => {
@@ -156,11 +183,20 @@ export default function SuneungTimeCapsule() {
 
   // Supabase에서 캡슐 불러오기
   const loadCapsules = async () => {
-    // Supabase가 설정되지 않았으면 localStorage 사용
+    // Supabase가 설정되지 않았으면 즉시 localStorage 사용
     if (!supabase) {
+      console.log('Supabase가 설정되지 않았습니다. localStorage를 사용합니다.');
       loadCapsulesFromLocalStorage();
       return;
     }
+
+    // 타임아웃 설정 (1.5초)
+    let timeoutTriggered = false;
+    const timeoutId = setTimeout(() => {
+      timeoutTriggered = true;
+      console.warn('Supabase 연결이 너무 오래 걸립니다. localStorage를 사용합니다.');
+      loadCapsulesFromLocalStorage();
+    }, 1500);
 
     try {
       const { data, error } = await supabase
@@ -168,9 +204,14 @@ export default function SuneungTimeCapsule() {
         .select('*')
         .order('created_at', { ascending: false });
 
+      // 타임아웃이 이미 발생했으면 무시
+      if (timeoutTriggered) {
+        return;
+      }
+      clearTimeout(timeoutId);
+
       if (error) {
         console.error('캡슐 로드 실패:', error);
-        // Supabase 연결 실패 시 localStorage로 폴백
         loadCapsulesFromLocalStorage();
         return;
       }
@@ -182,9 +223,9 @@ export default function SuneungTimeCapsule() {
           name: capsule.name,
           password: capsule.password,
           image: capsule.image,
-          currentFeeling: capsule.current_feeling || capsule.currentFeeling,
-          futureMessage: capsule.future_message || capsule.futureMessage,
-          createdAt: capsule.created_at || capsule.createdAt,
+          currentFeeling: capsule.current_feeling || '',
+          futureMessage: capsule.future_message || '',
+          createdAt: capsule.created_at || new Date().toISOString(),
           position: capsule.position || {
             x: Math.random() * 60 + 20,
             y: 10 + Math.random() * 20
@@ -192,41 +233,31 @@ export default function SuneungTimeCapsule() {
           velocity: capsule.velocity || { x: 0, y: 0 }
         }));
         setCapsules(capsulesWithPosition);
+        setLoading(false);
       } else {
-        // 데이터가 없으면 localStorage 확인
-        loadCapsulesFromLocalStorage();
+        // 데이터가 없으면 빈 배열로 설정
+        setCapsules([]);
+        setLoading(false);
       }
     } catch (error) {
-      console.error('캡슐 로드 실패:', error);
-      // 에러 발생 시 localStorage로 폴백
-      loadCapsulesFromLocalStorage();
-    } finally {
-      setLoading(false);
+      if (!timeoutTriggered) {
+        clearTimeout(timeoutId);
+        console.error('캡슐 로드 실패:', error);
+        loadCapsulesFromLocalStorage();
+      }
     }
   };
 
-  // localStorage에서 캡슐 불러오기 (폴백)
-  const loadCapsulesFromLocalStorage = () => {
-    try {
-      const storedCapsules = localStorage.getItem('timeCapsules');
-      if (storedCapsules) {
-        const loadedCapsules = JSON.parse(storedCapsules);
-        const capsulesWithPosition = loadedCapsules.map(capsule => {
-          if (!capsule.position) {
-            capsule.position = {
-              x: Math.random() * 60 + 20,
-              y: 10 + Math.random() * 20
-            };
-          }
-          capsule.velocity = capsule.velocity || { x: 0, y: 0 };
-          return capsule;
-        });
-        setCapsules(capsulesWithPosition);
-      }
-    } catch (error) {
-      console.error('localStorage 로드 실패:', error);
+  // 스토리지에서 캡슐 불러오기 - 컴포넌트 마운트 시 즉시 실행
+  useEffect(() => {
+    // 즉시 localStorage 확인 (빠른 로딩)
+    loadCapsulesFromLocalStorage();
+    
+    // 그 다음 Supabase 시도 (백그라운드)
+    if (supabase) {
+      loadCapsules();
     }
-  };
+  }, []);
 
   // Supabase에 캡슐 저장
   const saveCapsuleToSupabase = async (capsule) => {
@@ -478,10 +509,26 @@ export default function SuneungTimeCapsule() {
     setPasswordError('');
   };
 
+  // 로딩 상태가 너무 오래 지속되면 강제로 해제 (타임아웃)
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      if (loading) {
+        console.warn('로딩 타임아웃 - 강제로 로딩 상태 해제');
+        setLoading(false);
+        setCapsules([]);
+      }
+    }, 2000); // 2초 타임아웃
+
+    return () => clearTimeout(timeout);
+  }, [loading]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50 flex items-center justify-center">
-        <div className="text-2xl text-purple-600 font-bold">로딩 중...</div>
+        <div className="text-center">
+          <div className="text-2xl text-purple-600 font-bold mb-2 animate-pulse">로딩 중...</div>
+          <div className="text-sm text-gray-500">잠시만 기다려주세요</div>
+        </div>
       </div>
     );
   }
